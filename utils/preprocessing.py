@@ -1,10 +1,105 @@
 import scipy.io as sio
 import numpy as np
 import pandas as pd
+import json
+from pathlib import Path
 global PLOTQ # REF_IDX, CHANNELS
 #REF_IDX = 70 # is using 1x 32 CH and 1x 64 CH grids # !!!OTBio Muovi/Muovi+/Syncstation specific!!!
 #CHANNELS = [0, 64]# if Grid 1 is 32 CH [36,100] # if 1st grid is 32 CH and 2nd is 64 CH # !!!OTBio Muovi/Muovi+/Syncstation specific!!!
 PLOTQ = False # !!set!!
+
+def load_hdsemg_select_json(mat_path):
+    """
+    Load hdsemg-select JSON file for channel selection information.
+
+    This function looks for a JSON file with the same name as the .mat file
+    (but with .json extension) that contains channel selection info from hdsemg-select.
+
+    Args:
+        mat_path (str or Path): Path to the .mat file.
+
+    Returns:
+        dict or None: Dictionary containing:
+            - 'channel_range': [start_idx, end_idx] for the first grid's EMG channels
+            - 'good_channel_indices': List of channel indices (relative to channel_range) that are selected
+            - 'bad_channel_indices': List of channel indices (relative to channel_range) marked as bad
+            - 'ref_signals': List of dicts with reference signal info
+            - 'grids': List of grid configurations
+        Returns None if JSON file doesn't exist.
+
+    Example:
+        >>> config = load_hdsemg_select_json("data.mat")
+        >>> print(config['channel_range'])  # [4, 68]
+        >>> print(config['good_channel_indices'])  # [2, 3, 4, ...]
+    """
+    json_path = Path(mat_path).with_suffix('.json')
+
+    if not json_path.exists():
+        print(f"No hdsemg-select JSON found at {json_path}, using manual configuration")
+        return None
+
+    try:
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+
+        print(f"Loaded hdsemg-select configuration from {json_path}")
+
+        # Extract grid information (assuming first grid for now)
+        if 'grids' not in data or len(data['grids']) == 0:
+            print("Warning: No grids found in JSON file")
+            return None
+
+        first_grid = data['grids'][0]
+        grid_channels = first_grid['channels']
+
+        # Get the channel range (first to last channel index in the grid)
+        channel_indices = [ch['channel_index'] for ch in grid_channels]
+        channel_range = [min(channel_indices), max(channel_indices) + 1]
+
+        # Get good channels (selected=True and no "Bad Channel" label)
+        good_channel_indices = []
+        bad_channel_indices = []
+
+        for ch in grid_channels:
+            relative_idx = ch['channel_index'] - channel_range[0]
+
+            # Check if channel is selected and not labeled as bad
+            is_bad = 'Bad Channel' in ch.get('labels', [])
+            is_selected = ch.get('selected', False)
+
+            if is_selected and not is_bad:
+                good_channel_indices.append(relative_idx)
+            else:
+                bad_channel_indices.append(relative_idx)
+
+        # Extract reference signal information
+        ref_signals = first_grid.get('reference_signals', [])
+
+        result = {
+            'channel_range': channel_range,
+            'good_channel_indices': good_channel_indices,
+            'bad_channel_indices': bad_channel_indices,
+            'ref_signals': ref_signals,
+            'grids': data['grids'],
+            'filename': data.get('filename', ''),
+            'ied': first_grid.get('inter_electrode_distance_mm', None)
+        }
+
+        print(f"  Grid: {first_grid.get('rows', '?')}x{first_grid.get('columns', '?')}, "
+              f"IED: {result['ied']}mm")
+        print(f"  Channel range: {channel_range[0]}-{channel_range[1]-1}")
+        print(f"  Good channels: {len(good_channel_indices)}/{len(grid_channels)}")
+        print(f"  Bad channels: {len(bad_channel_indices)}")
+
+        return result
+
+    except json.JSONDecodeError as e:
+        print(f"Error parsing JSON file {json_path}: {e}")
+        return None
+    except Exception as e:
+        print(f"Error loading hdsemg-select JSON: {e}")
+        return None
+
 def extract_raw_emg_metadata(mat_path, config, mat_source='otb+'):
     """
     Extracts and structures raw EMG metadata and signals from a .mat file.
@@ -75,9 +170,13 @@ def extract_raw_emg_metadata(mat_path, config, mat_source='otb+'):
         print(f" ... IED: {ied}")
 
         # Extract additional metadata
+        # Include bad_channels information in extras for export
+        bad_channels_list = list(config.bad_channels) if hasattr(config, 'bad_channels') and config.bad_channels else []
+        bad_channels_info = f"bad_channels={bad_channels_list}"
         extras = pd.DataFrame([
-            description0.replace('(1)', ''), 
-            mat['Description'][ref_path_measured_idx][0][0], 
+            description0.replace('(1)', ''),
+            mat['Description'][ref_path_measured_idx][0][0],
+            bad_channels_info,
             str(config)
         ])
     
@@ -86,35 +185,67 @@ def extract_raw_emg_metadata(mat_path, config, mat_source='otb+'):
 
     return rawEMG_Channels, refSignal, fsamp, ied, extras
 
-def loadEMG_updConfig(mat, config, channel_range, ref_path_target_idx, ref_path_measured_idx, bad_channels = [], mat_source='otb+', n_std=7, sFrom=1, sTo=3, PLOTQ=False):
+def loadEMG_updConfig(mat, config, channel_range=None, ref_path_target_idx=None, ref_path_measured_idx=None, bad_channels=None, hdsemg_config=None, mat_source='otb+', n_std=7, sFrom=1, sTo=3, PLOTQ=False):
     """
     Extract raw EMG data from source file and update decomposition configurations.
 
-    This function reads neurophysiological data and adapts the configuration parameters based 
+    This function reads neurophysiological data and adapts the configuration parameters based
     on the recording metadata (e.g., sampling rate, signal trimming thresholds).
+
+    Can be used in two modes:
+    1. Manual mode: Provide channel_range, ref_path_target_idx, ref_path_measured_idx, bad_channels
+    2. JSON mode: Provide hdsemg_config (from load_hdsemg_select_json())
 
     Args:
         mat (dict): Dictionary containing .mat file data.
         config (Config): Existing configuration object to update.
-        channel_range (list of size 1,2): EMG channel indices from ... to
-        ref_path_target_idx (int): index to target path.
-        ref_path_measured_idx (int): index to performed path.
-        bad_channels (list): channel number to be removed. Defaults to [] 
+        channel_range (list of size 1,2, optional): EMG channel indices from ... to. If None, will use hdsemg_config.
+        ref_path_target_idx (int, optional): index to target path. If None, will use hdsemg_config.
+        ref_path_measured_idx (int, optional): index to performed path. If None, will use hdsemg_config.
+        bad_channels (list, optional): channel indices (relative to channel_range) to be removed. If None, will use hdsemg_config.
+        hdsemg_config (dict, optional): Configuration dict from load_hdsemg_select_json(). Takes precedence over manual parameters.
         mat_source (str, optional): Specifies the source format ('otb+' or 'original'). Defaults to 'otb+'.
         n_std (int, optional): Number of standard deviations for thresholding. Defaults to 7.
         sFrom (int, optional): Baseline force calculation start (in sec). Defaults to 1.
         sTo (int, optional): Baseline force calculation end (in sec). Defaults to 3.
+        PLOTQ (bool, optional): Whether to plot the signals. Defaults to False.
 
     Returns:
         Tuple[dict, Config]: Updated `.mat` data and modified configuration.
-        
-    ToDo:
-        Implement the selection of good channels.
 
     Raises:
-        ValueError: If `mat_source` is unsupported.
+        ValueError: If `mat_source` is unsupported or required parameters are missing.
     """
     if mat_source == 'otb+':
+        # If hdsemg_config is provided, use it instead of manual parameters
+        if hdsemg_config is not None:
+            print("Using hdsemg-select JSON configuration")
+            channel_range = hdsemg_config['channel_range']
+            bad_channels = hdsemg_config['bad_channel_indices']
+
+            # Find reference signals - look for the ones marked as selected
+            # Typically target is the first ref, measured is the second
+            ref_signals = hdsemg_config.get('ref_signals', [])
+            selected_refs = [ref for ref in ref_signals if ref.get('selected', False)]
+
+            if len(selected_refs) >= 2:
+                ref_path_target_idx = selected_refs[0]['ref_index']
+                ref_path_measured_idx = selected_refs[1]['ref_index']
+                print(f"  Reference signals from JSON: target={ref_path_target_idx}, measured={ref_path_measured_idx}")
+            elif len(selected_refs) == 1:
+                # Use the same signal for both if only one is available
+                ref_path_target_idx = selected_refs[0]['ref_index']
+                ref_path_measured_idx = selected_refs[0]['ref_index']
+                print(f"  Using single reference signal: {ref_path_measured_idx}")
+            else:
+                raise ValueError("No reference signals found in hdsemg-select JSON. Please select at least one reference signal.")
+        else:
+            # Manual mode - validate that required parameters are provided
+            if channel_range is None or ref_path_target_idx is None or ref_path_measured_idx is None:
+                raise ValueError("When not using hdsemg_config, channel_range, ref_path_target_idx, and ref_path_measured_idx must be provided")
+            if bad_channels is None:
+                bad_channels = []
+
         # Create the full list of channels
         all_channels = list(range(channel_range[0], channel_range[1]))
         # Filter out channels at indices specified in bad_channels

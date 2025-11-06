@@ -8,7 +8,7 @@ from config.structures import set_random_seed, Config
 from models.scd import SwarmContrastiveDecomposition
 from processing.postprocess import save_results
 from utils.exporting import export_to_openhdemg_json, export_to_muedit_mat
-from utils.preprocessing import loadEMG_updConfig, extract_raw_emg_metadata
+from utils.preprocessing import loadEMG_updConfig, extract_raw_emg_metadata, load_hdsemg_select_json
 
 set_random_seed(seed=42)
 
@@ -53,13 +53,25 @@ def train(path):
     )
 
     # Load data
-    channel_range = [0,64] # ToDo - get from channelselect
-    ref_path_measured_idx = 70 # ToDo - get from channelselect
-    ref_path_target_idx = 71 # ToDo - get from channelselect
-    bad_channels = [] # ToDo - get from channelselect
     if path.suffix == ".mat":
         mat = sio.loadmat(path)
-        mat, config = loadEMG_updConfig(mat, config, channel_range, ref_path_target_idx, ref_path_measured_idx, bad_channels) # ToDo pass all other settings to loadEMG_updConfig, maybe as one dict
+
+        # Try to load hdsemg-select JSON configuration
+        hdsemg_config = load_hdsemg_select_json(path)
+
+        if hdsemg_config is not None:
+            # Use JSON configuration
+            print("Using hdsemg-select channel configuration")
+            mat, config = loadEMG_updConfig(mat, config, hdsemg_config=hdsemg_config)
+        else:
+            # Fall back to manual configuration
+            print("Using manual channel configuration")
+            channel_range = [0, 64]  # Update these for your specific setup
+            ref_path_measured_idx = 70
+            ref_path_target_idx = 71
+            bad_channels = []
+            mat, config = loadEMG_updConfig(mat, config, channel_range, ref_path_target_idx, ref_path_measured_idx, bad_channels)
+
         neural_data = (
             torch.from_numpy(mat["emg"]).t().to(device=device, dtype=torch.float32)
         )  # time, channels
@@ -110,14 +122,14 @@ if __name__ == "__main__":
 	
         save_results(output_path, dictionary)
         print(f"Saved results to {output_path}")
-	    
+
 	    # Prepare Raw Data Info for openHDEMG
-        rawEMG_Channels, refSignal, fsamp, ied, extras = extract_raw_emg_metadata(path, config) # ToDo - add bad_channels and all other decomposition settings to extras
+        rawEMG_Channels, refSignal, fsamp, ied, extras = extract_raw_emg_metadata(path, config)
         # Save decomposition result to openhdemg compressed json format
-        export_to_openhdemg_json(config, output_path, rawEMG_Channels, refSignal, ied, fsamp, os.path.join(path), extras) # ToDo - ensure bad_channels is written correctly to extras
+        export_to_openhdemg_json(config, output_path, rawEMG_Channels, refSignal, ied, fsamp, os.path.join(path), extras)
         # Save decomposition result to muEdit compatible .mat format for manual cleaning
         export_to_muedit_mat(
-            str(output_path).replace('.pkl','.json') # ToDo - ensure to transfer bad_channels to muedit
+            str(output_path).replace('.pkl','.json')
         )
         
     print('--- ALL DONE ---')

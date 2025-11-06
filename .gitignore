@@ -20,3 +20,6 @@ __pycache__/
 
 # Ignore venv folder
 venv/
+.idea/
+data/
+CLAUDE.md

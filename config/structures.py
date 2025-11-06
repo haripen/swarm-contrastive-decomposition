@@ -30,6 +30,10 @@ class Config:
     # Data parameters
     start_time: int = 0
     end_time: int = -1
+    channel_range: Optional[Tuple[int, int]] = None
+    ref_path_target_idx: Optional[int] = None
+    ref_path_measured_idx: Optional[int] = None
+    bad_channels: Optional[Sequence[int]] = None
 
     # EMG preprocessing parameters
     sampling_frequency: Optional[int] = None

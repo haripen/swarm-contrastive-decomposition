@@ -194,7 +194,29 @@ def export_to_muedit_mat(json_load_filepath, ngrid = 1):
     
     # Build 1 x ngrid MATLAB cell
     bad_channel_bool = np.empty((1,ngrid), dtype=object)
-    bad_channel_bool[0,0] = np.asarray(np.zeros(((nCH,1)))) # ToDo - add bad channels from json_from_openhdemg["EXTRAS"]
+
+    # Extract bad_channels from EXTRAS if available
+    bad_channels = []
+    try:
+        if 'EXTRAS' in json_from_openhdemg and len(json_from_openhdemg['EXTRAS']) > 2:
+            # Third entry in EXTRAS contains bad_channels info
+            bad_channels_str = str(json_from_openhdemg['EXTRAS'].loc[2.0])
+            if 'bad_channels=' in bad_channels_str:
+                # Parse the bad_channels list from the string
+                import ast
+                bad_channels_list_str = bad_channels_str.split('bad_channels=')[1].strip()
+                bad_channels = ast.literal_eval(bad_channels_list_str)
+                print(f"  Loaded bad_channels from EXTRAS: {bad_channels}")
+    except Exception as e:
+        print(f"  Could not parse bad_channels from EXTRAS: {e}")
+
+    # Create EMGmask: 0 = keep channel, 1 = discard channel
+    emg_mask = np.zeros((nCH, 1))
+    for bad_ch_idx in bad_channels:
+        if 0 <= bad_ch_idx < nCH:
+            emg_mask[bad_ch_idx, 0] = 1
+
+    bad_channel_bool[0, 0] = emg_mask
     dict_for_muedit['signal']['EMGmask'] = bad_channel_bool
     
     # parameters
